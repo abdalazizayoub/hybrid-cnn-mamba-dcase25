@@ -1,0 +1,10 @@
+pytorch-lightning
+torchinfo
+transformers
+pandas
+scikit-learn
+wandb
+av
+h5py
+sox
+soundfile
