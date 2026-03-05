@@ -11,7 +11,7 @@ from typing import Optional, List
 
 
 dataset_dir = "/home/abdalaziz-ayoub/datasets/PR_DATA"
-assert dataset_dir, "Specify 'TAU Urban Acoustic Scenes 2022 Mobile' dataset location in 'dataset_dir'. Download from: https://zenodo.org/record/6337421"
+assert dataset_dir, "Specify 'TAU Urban Acoustic Scenes 2022 Mobile' dataset location in 'dataset_dir'."
 
 # Dataset configuration
 dataset_config = {
@@ -20,51 +20,71 @@ dataset_config = {
     "split_path": "split_setup",
     "split_url": "https://github.com/CPJKU/dcase2024_task1_baseline/releases/download/files/",
     "test_split_csv": "test.csv",
-    "eval_dir": None,  # Evaluation set release on 1st of June
+    "eval_dir": None,  
     "eval_fold_csv": None
 }
 
 
 class DCASE25Dataset(Dataset):
     """
-    DCASE'25 Dataset: Loads metadata and provides access to audio samples.
+    DCASE'25 Dataset: Generates SNTL-NTU Ultra-High Resolution Spectrograms natively.
     """
-    def __init__(self, meta_csv: str):
-        """
-        Initializes the dataset.
-
-        Args:
-            meta_csv (str): Path to the dataset metadata CSV file.
-        """
+    def __init__(self, meta_csv: str, roll_samples: int = 0):
         df = pd.read_csv(meta_csv, sep="\t")
         df["filename"] = df["filename"].str.replace("/", os.sep)        
 
         self.files = df["filename"].values
         self.devices = df["source_label"].values
         self.cities = LabelEncoder().fit_transform(df["identifier"].apply(lambda loc: loc.split("-")[0]))
-        self.labels = torch.tensor(LabelEncoder().fit_transform(df["scene_label"]), dtype=torch.long)
+        
+        # Hardcoding the 10 labels to ensure they map identically every single time
+        self.classes = ['airport', 'bus', 'metro', 'metro_station', 'park',
+                        'public_square', 'shopping_mall', 'street_pedestrian',
+                        'street_traffic', 'tram']
+        class_to_idx = {c: i for i, c in enumerate(self.classes)}
+        self.labels = torch.tensor([class_to_idx[lbl] for lbl in df["scene_label"]], dtype=torch.long)
+
+        self.roll_samples = roll_samples
+
+        # ==========================================
+        # SNTL-NTU ULTRA-HIGH RESOLUTION SETTINGS
+        # ==========================================
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=44100,      
+            n_fft=8192,             
+            win_length=8192,        
+            hop_length=1364,        
+            n_mels=256              
+        )
+        self.amp_to_db = torchaudio.transforms.AmplitudeToDB(stype='power')
 
     def __getitem__(self, index: int):
-        """Loads an audio sample and corresponding metadata."""
         audio_path = os.path.join(dataset_dir, self.files[index])
-        waveform, _ = torchaudio.load(audio_path)
-        waveform = waveform.squeeze()
-        if waveform.dim() == 1:
-            waveform = waveform.unsqueeze(0)  
-            
-           
+        waveform, sr = torchaudio.load(audio_path)
         
-        return waveform, self.files[index], self.labels[index], self.devices[index], self.cities[index]
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+            
+        if sr != 44100:
+            waveform = torchaudio.functional.resample(waveform, sr, 44100)
+            
+        # Time-shifting directly on the raw waveform (before spectrogram conversion)
+        if self.roll_samples > 0:
+            shift = np.random.randint(-self.roll_samples, self.roll_samples + 1)
+            waveform = waveform.roll(shift, dims=1)
+
+        # Output shape will be [1, 256, 33]
+        x = self.mel_transform(waveform)
+        x = self.amp_to_db(x)
+        
+        return x, self.files[index], self.labels[index], self.devices[index], self.cities[index]
 
     def __len__(self) -> int:
         return len(self.files)
 
 
 class SubsetDataset(Dataset):
-    """
-    A dataset that selects a subset of samples based on given indices.
-    """
-
+    """A dataset that selects a subset of samples based on given indices."""
     def __init__(self, dataset: Dataset, indices: List[int]):
         self.dataset = dataset
         self.indices = indices
@@ -76,29 +96,10 @@ class SubsetDataset(Dataset):
         return len(self.indices)
 
 
-class TimeShiftDataset(Dataset):
-    """
-    A dataset implementing time shifting of waveforms.
-    """
-
-    def __init__(self, dataset: Dataset, shift_range: int, axis: int = 1):
-        self.dataset = dataset
-        self.shift_range = shift_range
-        self.axis = axis
-
-    def __getitem__(self, index: int):
-        waveform, file, label, device, city = self.dataset[index]
-        shift = np.random.randint(-self.shift_range, self.shift_range + 1)
-        return waveform.roll(shift, self.axis), file, label, device, city
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-
 # --- Dataset Loading Functions --- #
 
 def download_split_file(split_name: str):
-    """Downloads dataset split files if not available."""
+    """Downloads official DCASE dataset split files if not available."""
     os.makedirs(dataset_config["split_path"], exist_ok=True)
     split_file = os.path.join(dataset_config["split_path"], split_name)
     if not os.path.isfile(split_file):
@@ -107,34 +108,28 @@ def download_split_file(split_name: str):
     return split_file
 
 
-def get_dataset_split(meta_csv: str, split_csv: str, device: Optional[str] = None) -> Dataset:
-    """
-    Filters the dataset based on the given split file and optionally by device.
-    """
+def get_dataset_split(meta_csv: str, split_csv: str, device: Optional[str] = None, roll: int = 0) -> Dataset:
+    """Filters the dataset safely using the official CP-JKU split logic."""
     meta = pd.read_csv(meta_csv, sep="\t")
     split_files = pd.read_csv(split_csv, sep="\t")["filename"].values
+    
+    # This guarantees NO data leakage!
     subset_indices = meta[meta["filename"].isin(split_files)].index.tolist()
+    
     if device:
         subset_indices = meta.loc[subset_indices, :].query("source_label == @device").index.tolist()
-    return SubsetDataset(DCASE25Dataset(meta_csv), subset_indices)
+        
+    return SubsetDataset(DCASE25Dataset(meta_csv, roll_samples=roll), subset_indices)
 
 
-def get_training_set(split: int = 100, device: Optional[str] = None, roll: int = 0) -> Dataset:
-    """
-    Returns the training dataset for a specified data split percentage.
-
-    Args:
-        split (int): Percentage of the dataset to use [5, 10, 25, 50, 100].
-        device (Optional[str]): Specific device to filter on.
-        roll (int): Time shift range.
-    """
+def get_training_set(split: int = 25, device: Optional[str] = None, roll: int = 0) -> Dataset:
+    """Returns the perfectly isolated training dataset."""
     assert str(split) in ("5", "10", "25", "50", "100"), "split must be in {5, 10, 25, 50, 100}"
     subset_file = download_split_file(f"split{split}.csv")
-    dataset = get_dataset_split(dataset_config["meta_csv"], subset_file, device)
-    return TimeShiftDataset(dataset, shift_range=roll) if roll else dataset
+    return get_dataset_split(dataset_config["meta_csv"], subset_file, device, roll=roll)
 
 
 def get_test_set(device: Optional[str] = None) -> Dataset:
-    """Returns the test dataset."""
+    """Returns the perfectly isolated test dataset."""
     test_split_file = download_split_file(dataset_config["test_split_csv"])
-    return get_dataset_split(dataset_config["meta_csv"], test_split_file, device)
+    return get_dataset_split(dataset_config["meta_csv"], test_split_file, device, roll=0)
