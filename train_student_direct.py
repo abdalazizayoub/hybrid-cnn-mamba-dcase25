@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,7 +17,36 @@ sys.path.append(current_dir)
 
 from dataset.dcase25 import get_training_set, get_test_set
 from models.hybrid_net import get_model as get_student_model
-from helpers.complexity import get_torch_macs_memory , get_model_size_bytes
+from helpers.complexity import get_torch_macs_memory, get_model_size_bytes
+
+# ==========================================
+# 🚀 THE LOSS TRICK: FOCAL LOSS
+# ==========================================
+class FocalLoss(nn.Module):
+    """
+    Down-weights easy examples and focuses the model on hard-to-classify acoustic scenes.
+    """
+    def __init__(self, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        # Calculate standard Cross Entropy (unreduced)
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        
+        # Get the probabilities of the true class (pt)
+        pt = torch.exp(-ce_loss) 
+        
+        # Apply the Focal Loss formula: (1 - pt)^gamma * CE
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 
 class DirectStudentModule(pl.LightningModule):
@@ -35,8 +65,10 @@ class DirectStudentModule(pl.LightningModule):
             patch_size=config.patch_size
         )
 
-        # 2. SNTL-NTU Augmentation: SpecAugment (Frequency Masking)
+        # 2. Augmentations & Loss
         self.freq_mask = T.FrequencyMasking(freq_mask_param=48)
+        self.focal_loss = FocalLoss(gamma=config.focal_gamma) # Initialize Focal Loss!
+        
         self.device_ids = ['a', 'b', 'c', 's1', 's2', 's3', 's4', 's5', 's6']
         self.label_ids = ['airport', 'bus', 'metro', 'metro_station', 'park',
                           'public_square', 'shopping_mall', 'street_pedestrian',
@@ -58,17 +90,17 @@ class DirectStudentModule(pl.LightningModule):
         max_bytes = 128000
         max_kb = max_bytes / 1024.0
         print("\n" + "="*60)
-        print(" DCASE 2025 TASK 1 COMPLEXITY REPORT 🚀")
+        print("🚀 DCASE 2025 TASK 1 COMPLEXITY REPORT 🚀")
         print(f"Current FP32 Size     : {current_kb:.2f} KB")
         print(f"FP16 Inference Size   : {fp16_kb:.2f} KB (Limit: {max_kb:.2f} KB)")
         
         compliant = True
         if fp16_bytes > max_bytes:
-            print(" WARNING: Model SIZE is OVER the 128,000 bytes limit!")
+            print("⚠️ WARNING: Model SIZE is OVER the 128,000 bytes limit!")
             compliant = False
             
         if compliant:
-            print("STATUS: Fully compliant with all DCASE constraints.")
+            print("✅ STATUS: Fully compliant with all DCASE constraints.")
         print("="*60 + "\n")
         if self.logger and hasattr(self.logger.experiment, 'config'):
             self.logger.experiment.config.update({
@@ -92,9 +124,24 @@ class DirectStudentModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, _, labels, _, _ = batch
-        x_aug = self.freq_mask(x)
-        y_hat = self.student(x_aug)
-        loss = F.cross_entropy(y_hat, labels)
+        x = self.freq_mask(x)
+
+        # MIXUP + FOCAL LOSS SYNERGY
+        if self.config.mixup_alpha > 0.0:
+            lam = np.random.beta(self.config.mixup_alpha, self.config.mixup_alpha)
+            batch_size = x.size(0)
+            index = torch.randperm(batch_size).to(self.device)
+            mixed_x = lam * x + (1 - lam) * x[index]
+            y_a, y_b = labels, labels[index]
+            
+            y_hat = self.student(mixed_x)
+            
+            # Apply Focal Loss to the mixed labels
+            loss = lam * self.focal_loss(y_hat, y_a) + (1 - lam) * self.focal_loss(y_hat, y_b)
+        else:
+            y_hat = self.student(x)
+            # Apply Focal Loss to the standard labels
+            loss = self.focal_loss(y_hat, labels)
 
         self.log("train/loss", loss, on_step=True, on_epoch=True, batch_size=x.size(0))
         self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"], batch_size=x.size(0))
@@ -115,40 +162,61 @@ class DirectStudentModule(pl.LightningModule):
             "n_pred": torch.as_tensor(len(labels), device=self.device)
         }
 
+        # 1. Log accuracy by DEVICE
         for i, d in enumerate(devices):
             results[f"devloss.{d}"] = results.get(f"devloss.{d}", torch.as_tensor(0., device=self.device)) + samples_loss[i]
             results[f"devcnt.{d}"] = results.get(f"devcnt.{d}", torch.as_tensor(0., device=self.device)) + 1
             results[f"devn_correct.{d}"] = results.get(f"devn_correct.{d}", torch.as_tensor(0., device=self.device)) + n_correct_per_sample[i]
 
+        # 2. Log accuracy by INDIVIDUAL CLASS
+        for i, class_name in enumerate(self.label_ids):
+            class_mask = (labels == i)
+            results[f"classcnt.{class_name}"] = class_mask.sum()
+            results[f"classcorrect.{class_name}"] = (preds[class_mask] == labels[class_mask]).sum()
+
         self.validation_step_outputs.append({k: v.cpu() for k, v in results.items()})
         return samples_loss.mean()
 
     def on_validation_epoch_end(self):
-        outputs = {k: [] for k in self.validation_step_outputs[0]}
+        outputs = {}
         for step_output in self.validation_step_outputs:
             for k, v in step_output.items():
+                if k not in outputs:
+                    outputs[k] = []
                 outputs[k].append(v)
+                
         for k in outputs:
             outputs[k] = torch.stack(outputs[k])
 
         avg_loss = outputs["loss"].mean()
-        acc = outputs["n_correct"].sum() / outputs["n_pred"].sum()
-        logs = {"acc": acc, "loss": avg_loss}
+        micro_acc = outputs["n_correct"].sum() / outputs["n_pred"].sum()
+        logs = {"micro_acc": micro_acc, "loss": avg_loss}
 
+        # --- DEVICE ACCURACIES ---
         for d in self.device_ids:
-            dev_cnt = outputs.get(f"devcnt.{d}", torch.as_tensor(0.)).sum()
+            dev_cnt = outputs.get(f"devcnt.{d}", torch.as_tensor([0.])).sum()
             if dev_cnt > 0:
-                logs[f"acc.{d}"] = outputs.get(f"devn_correct.{d}", torch.as_tensor(0.)).sum() / dev_cnt
+                logs[f"acc.{d}"] = outputs.get(f"devn_correct.{d}", torch.as_tensor([0.])).sum() / dev_cnt
             
             grp = self.device_groups[d]
-            logs[f"acc.{grp}"] = logs.get(f"acc.{grp}", 0.) + outputs.get(f"devn_correct.{d}", torch.as_tensor(0.)).sum()
+            logs[f"acc.{grp}"] = logs.get(f"acc.{grp}", 0.) + outputs.get(f"devn_correct.{d}", torch.as_tensor([0.])).sum()
             logs[f"count.{grp}"] = logs.get(f"count.{grp}", 0.) + dev_cnt
 
         for grp in set(self.device_groups.values()):
             if logs.get(f"count.{grp}", 0) > 0:
                 logs[f"acc.{grp}"] /= logs[f"count.{grp}"]
 
-        macro_acc = outputs["n_correct"].sum() / outputs["n_pred"].sum() 
+        # --- CLASS ACCURACIES & OFFICIAL DCASE MACRO ACCURACY ---
+        class_accuracies = []
+        for class_name in self.label_ids:
+            c_cnt = outputs.get(f"classcnt.{class_name}", torch.as_tensor([0.])).sum()
+            if c_cnt > 0:
+                c_correct = outputs.get(f"classcorrect.{class_name}", torch.as_tensor([0.])).sum()
+                c_acc = c_correct / c_cnt
+                logs[f"acc_class/{class_name}"] = c_acc
+                class_accuracies.append(c_acc)
+
+        macro_acc = sum(class_accuracies) / len(class_accuracies) if class_accuracies else 0.0
         
         logs.pop("loss", None)
         
@@ -194,8 +262,8 @@ if __name__ == '__main__':
     parser.add_argument("--project_name", type=str, default="DCASE25_Hybrid_Direct")
     parser.add_argument("--experiment_name", type=str, default="Hybrid_SNTL_Baseline")
     
-    parser.add_argument("--embed_dim", type=int, default=32)
-    parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--embed_dim", type=int, default=64)
+    parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--patch_size", type=int, default=4)
     
     parser.add_argument("--lr", type=float, default=0.001)              
@@ -211,6 +279,9 @@ if __name__ == '__main__':
     parser.add_argument("--n_classes", type=int, default=10)
     parser.add_argument("--weight_decay", type=float, default=1e-4) 
     parser.add_argument("--roll_sec", type=float, default=0.1)          
+    
+    parser.add_argument("--mixup_alpha", type=float, default=0.3)          
+    parser.add_argument("--focal_gamma", type=float, default=2.0)          
     
     args = parser.parse_args()
     train(args)
