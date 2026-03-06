@@ -5,15 +5,12 @@ import torchaudio
 import numpy as np
 from torch.utils.data import Dataset
 from torch.hub import download_url_to_file
-
 from sklearn.preprocessing import LabelEncoder
 from typing import Optional, List
-
 
 dataset_dir = "/home/abdalaziz-ayoub/datasets/PR_DATA"
 assert dataset_dir, "Specify 'TAU Urban Acoustic Scenes 2022 Mobile' dataset location in 'dataset_dir'."
 
-# Dataset configuration
 dataset_config = {
     "dataset_name": "tau25",
     "meta_csv": os.path.join(dataset_dir, "meta_clean.csv"),
@@ -25,11 +22,47 @@ dataset_config = {
 }
 
 
+# ==========================================
+# 🚀 THE DEVICE AUGMENTATION TRICK
+# ==========================================
+class RandomMicEQ(torch.nn.Module):
+    """
+    Simulates the MicIRP trick by randomly altering the EQ of the audio.
+    This prevents the model from overfitting to the training microphones (A, B, C).
+    """
+    def __init__(self, sample_rate=44100):
+        super().__init__()
+        self.sample_rate = sample_rate
+
+    def forward(self, waveform):
+        # 50% chance to apply a fake microphone EQ during training
+        if torch.rand(1).item() < 0.5:
+            return waveform
+        
+        # 1. Random Peaking Filter (Simulates a resonant frequency in a cheap mic casing)
+        center_freq = torch.randint(300, 6000, (1,)).item()
+        gain = torch.randint(-15, 15, (1,)).item() # Cut or boost by up to 15 dB
+        Q = torch.rand(1).item() * 1.5 + 0.5 
+        
+        waveform = torchaudio.functional.equalizer_biquad(
+            waveform, self.sample_rate, center_freq, gain, Q
+        )
+        
+        # 2. Random Lowpass Filter (Simulates a muffled microphone or pocket recording)
+        if torch.rand(1).item() < 0.3:
+            cutoff = torch.randint(4000, 12000, (1,)).item()
+            waveform = torchaudio.functional.lowpass_biquad(waveform, self.sample_rate, cutoff)
+            
+        # 3. Random Highpass Filter (Simulates a tiny smartphone speaker/mic lacking bass)
+        if torch.rand(1).item() < 0.3:
+            cutoff = torch.randint(100, 800, (1,)).item()
+            waveform = torchaudio.functional.highpass_biquad(waveform, self.sample_rate, cutoff)
+            
+        return waveform
+
+
 class DCASE25Dataset(Dataset):
-    """
-    DCASE'25 Dataset: Generates SNTL-NTU Ultra-High Resolution Spectrograms natively.
-    """
-    def __init__(self, meta_csv: str, roll_samples: int = 0):
+    def __init__(self, meta_csv: str, roll_samples: int = 0, is_training: bool = False):
         df = pd.read_csv(meta_csv, sep="\t")
         df["filename"] = df["filename"].str.replace("/", os.sep)        
 
@@ -37,7 +70,6 @@ class DCASE25Dataset(Dataset):
         self.devices = df["source_label"].values
         self.cities = LabelEncoder().fit_transform(df["identifier"].apply(lambda loc: loc.split("-")[0]))
         
-        # Hardcoding the 10 labels to ensure they map identically every single time
         self.classes = ['airport', 'bus', 'metro', 'metro_station', 'park',
                         'public_square', 'shopping_mall', 'street_pedestrian',
                         'street_traffic', 'tram']
@@ -45,10 +77,11 @@ class DCASE25Dataset(Dataset):
         self.labels = torch.tensor([class_to_idx[lbl] for lbl in df["scene_label"]], dtype=torch.long)
 
         self.roll_samples = roll_samples
+        self.is_training = is_training
 
-        # ==========================================
-        # SNTL-NTU ULTRA-HIGH RESOLUTION SETTINGS
-        # ==========================================
+        # Initialize our new Fake Mic EQ
+        self.mic_eq = RandomMicEQ(sample_rate=44100)
+
         self.mel_transform = torchaudio.transforms.MelSpectrogram(
             sample_rate=44100,      
             n_fft=8192,             
@@ -68,12 +101,14 @@ class DCASE25Dataset(Dataset):
         if sr != 44100:
             waveform = torchaudio.functional.resample(waveform, sr, 44100)
             
-        # Time-shifting directly on the raw waveform (before spectrogram conversion)
         if self.roll_samples > 0:
             shift = np.random.randint(-self.roll_samples, self.roll_samples + 1)
             waveform = waveform.roll(shift, dims=1)
 
-        # Output shape will be [1, 256, 33]
+        # APPLY THE MIC EQ (Only during training!)
+        if self.is_training:
+            waveform = self.mic_eq(waveform)
+
         x = self.mel_transform(waveform)
         x = self.amp_to_db(x)
         
@@ -84,7 +119,6 @@ class DCASE25Dataset(Dataset):
 
 
 class SubsetDataset(Dataset):
-    """A dataset that selects a subset of samples based on given indices."""
     def __init__(self, dataset: Dataset, indices: List[int]):
         self.dataset = dataset
         self.indices = indices
@@ -96,10 +130,7 @@ class SubsetDataset(Dataset):
         return len(self.indices)
 
 
-# --- Dataset Loading Functions --- #
-
 def download_split_file(split_name: str):
-    """Downloads official DCASE dataset split files if not available."""
     os.makedirs(dataset_config["split_path"], exist_ok=True)
     split_file = os.path.join(dataset_config["split_path"], split_name)
     if not os.path.isfile(split_file):
@@ -108,28 +139,26 @@ def download_split_file(split_name: str):
     return split_file
 
 
-def get_dataset_split(meta_csv: str, split_csv: str, device: Optional[str] = None, roll: int = 0) -> Dataset:
-    """Filters the dataset safely using the official CP-JKU split logic."""
+def get_dataset_split(meta_csv: str, split_csv: str, device: Optional[str] = None, roll: int = 0, is_training: bool = False) -> Dataset:
     meta = pd.read_csv(meta_csv, sep="\t")
     split_files = pd.read_csv(split_csv, sep="\t")["filename"].values
     
-    # This guarantees NO data leakage!
     subset_indices = meta[meta["filename"].isin(split_files)].index.tolist()
     
     if device:
         subset_indices = meta.loc[subset_indices, :].query("source_label == @device").index.tolist()
         
-    return SubsetDataset(DCASE25Dataset(meta_csv, roll_samples=roll), subset_indices)
+    return SubsetDataset(DCASE25Dataset(meta_csv, roll_samples=roll, is_training=is_training), subset_indices)
 
 
 def get_training_set(split: int = 25, device: Optional[str] = None, roll: int = 0) -> Dataset:
-    """Returns the perfectly isolated training dataset."""
     assert str(split) in ("5", "10", "25", "50", "100"), "split must be in {5, 10, 25, 50, 100}"
     subset_file = download_split_file(f"split{split}.csv")
-    return get_dataset_split(dataset_config["meta_csv"], subset_file, device, roll=roll)
+    # Pass is_training=True so the Mic EQ activates!
+    return get_dataset_split(dataset_config["meta_csv"], subset_file, device, roll=roll, is_training=True)
 
 
 def get_test_set(device: Optional[str] = None) -> Dataset:
-    """Returns the perfectly isolated test dataset."""
     test_split_file = download_split_file(dataset_config["test_split_csv"])
-    return get_dataset_split(dataset_config["meta_csv"], test_split_file, device, roll=0)
+    # Pass is_training=False so validation stays pure
+    return get_dataset_split(dataset_config["meta_csv"], test_split_file, device, roll=0, is_training=False)
