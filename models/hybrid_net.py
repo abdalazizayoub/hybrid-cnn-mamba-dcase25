@@ -17,7 +17,6 @@ try:
 except ImportError as e:
     raise ImportError(f"Could not import Mamba. Ensure AUM/vim-mamba_ssm is accessible. Error: {e}")
 
-
 class SEBlock(nn.Module):
     """SNTL-NTU Squeeze-and-Excitation Block to suppress acoustic noise."""
     def __init__(self, channels, reduction=4):
@@ -60,6 +59,38 @@ class ConvBlock(nn.Module):
         x = self.act(x)
         x = self.se(x)
         return x
+
+
+# ==========================================
+# 🚀 THE NEW ATTENTION POOLING BLOCK
+# ==========================================
+class AttentionPooling(nn.Module):
+    """
+    Dynamically scores the importance of each sequence step.
+    Mutes background noise and amplifies critical acoustic events.
+    """
+    def __init__(self, embed_dim):
+        super().__init__()
+        # A tiny 2-layer network to calculate the "importance score"
+        self.attention = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.Tanh(),
+            nn.Linear(embed_dim // 2, 1)
+        )
+
+    def forward(self, x):
+        # x shape: [Batch, Sequence_Length, Embed_Dim]
+        
+        # 1. Calculate raw attention scores for each step
+        attn_weights = self.attention(x) # Shape: [Batch, Sequence_Length, 1]
+        
+        # 2. Convert scores to probabilities (0.0 to 1.0)
+        attn_weights = F.softmax(attn_weights, dim=1) 
+        
+        # 3. Multiply features by their importance and sum them up!
+        pooled_x = torch.sum(x * attn_weights, dim=1) # Shape: [Batch, Embed_Dim]
+        
+        return pooled_x
 
 
 class HybridCNNMamba(nn.Module):
@@ -121,8 +152,10 @@ class HybridCNNMamba(nn.Module):
         self.final_norm = nn.LayerNorm(self.embed_dim)
         
         # ==========================================
-        # 4. The Classifier
+        # 4. Attention Pooling & Classifier
         # ==========================================
+        self.attn_pool = AttentionPooling(self.embed_dim) # Replaces Average Pooling
+        
         self.classifier = nn.Sequential(
             nn.Linear(self.embed_dim, config['n_classes'])
         )
@@ -151,8 +184,8 @@ class HybridCNNMamba(nn.Module):
             
         x = self.final_norm(x)
         
-        # 4. Global Average Pooling over the Frequency Sequence
-        x = x.mean(dim=1) 
+        # 4. Attention Pooling! (Dynamically focuses on important frequencies)
+        x = self.attn_pool(x) 
         
         # 5. Classification
         logits = self.classifier(x) 
