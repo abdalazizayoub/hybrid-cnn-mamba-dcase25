@@ -1,14 +1,11 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import sys
 import os
 
-# --- BULLETPROOF IMPORTS ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.abspath(os.path.join(current_dir, '..'))
-
-# FIX: Insert Mamba at the very FRONT of the system path (index 0).
-# This prevents Python from confusing Mamba's internal code with your local 'models' folder!
 mamba_ssm_path = os.path.join(root_dir, 'AUM', 'vim-mamba_ssm')
 sys.path.insert(0, mamba_ssm_path)
 
@@ -16,6 +13,7 @@ try:
     from mamba_ssm import Mamba
 except ImportError as e:
     raise ImportError(f"Could not import Mamba. Ensure AUM/vim-mamba_ssm is accessible. Error: {e}")
+
 
 class SEBlock(nn.Module):
     """SNTL-NTU Squeeze-and-Excitation Block to suppress acoustic noise."""
@@ -51,7 +49,7 @@ class ConvBlock(nn.Module):
         )
         self.bn = nn.BatchNorm2d(out_channels)
         self.act = nn.GELU()
-        self.se = SEBlock(out_channels) # NEW: Attention mechanism
+        self.se = SEBlock(out_channels) # Attention mechanism
 
     def forward(self, x):
         x = self.conv(x)
@@ -61,9 +59,6 @@ class ConvBlock(nn.Module):
         return x
 
 
-# ==========================================
-# 🚀 THE NEW ATTENTION POOLING BLOCK
-# ==========================================
 class AttentionPooling(nn.Module):
     """
     Dynamically scores the importance of each sequence step.
@@ -134,6 +129,17 @@ class HybridCNNMamba(nn.Module):
         )
         
         # ==========================================
+        # 2.5 The Pre-Mamba Attention Spotlight
+        # ==========================================
+        # batch_first=True is required because our shape is [Batch, Sequence, Embed]
+        self.pre_attn = nn.MultiheadAttention(
+            embed_dim=self.embed_dim, 
+            num_heads=4, 
+            batch_first=True
+        )
+        self.pre_attn_norm = nn.LayerNorm(self.embed_dim)
+
+        # ==========================================
         # 3. The Mamba "Brain" (Temporal Processor)
         # ==========================================
         self.mamba_blocks = nn.ModuleList([
@@ -178,13 +184,18 @@ class HybridCNNMamba(nn.Module):
         # Bridge to Mamba Embed Dimension
         x = self.bridge_proj(x) 
         
+        # ---Pre-Mamba Global Self-Attention ---
+        attn_out, _ = self.pre_attn(x, x, x)
+        x = x + self.pre_attn_norm(attn_out) # Residual bypass lane!
+        # --------------------------------------------
+        
         # 3. Mamba Sequence Modeling (Scanning bottom-to-top frequencies)
         for mamba, norm in zip(self.mamba_blocks, self.mamba_norms):
             x = x + mamba(norm(x))
             
         x = self.final_norm(x)
         
-        # 4. Attention Pooling! (Dynamically focuses on important frequencies)
+        # 4. Attention Pooling
         x = self.attn_pool(x) 
         
         # 5. Classification
