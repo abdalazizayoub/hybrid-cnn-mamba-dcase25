@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import sys
 import os
 
@@ -57,35 +56,6 @@ class ConvBlock(nn.Module):
         x = self.act(x)
         x = self.se(x)
         return x
-
-
-class AttentionPooling(nn.Module):
-    """
-    Dynamically scores the importance of each sequence step.
-    Mutes background noise and amplifies critical acoustic events.
-    """
-    def __init__(self, embed_dim):
-        super().__init__()
-        # A tiny 2-layer network to calculate the "importance score"
-        self.attention = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim // 2),
-            nn.Tanh(),
-            nn.Linear(embed_dim // 2, 1)
-        )
-
-    def forward(self, x):
-        # x shape: [Batch, Sequence_Length, Embed_Dim]
-        
-        # 1. Calculate raw attention scores for each step
-        attn_weights = self.attention(x) # Shape: [Batch, Sequence_Length, 1]
-        
-        # 2. Convert scores to probabilities (0.0 to 1.0)
-        attn_weights = F.softmax(attn_weights, dim=1) 
-        
-        # 3. Multiply features by their importance and sum them up!
-        pooled_x = torch.sum(x * attn_weights, dim=1) # Shape: [Batch, Embed_Dim]
-        
-        return pooled_x
 
 
 class HybridCNNMamba(nn.Module):
@@ -158,10 +128,8 @@ class HybridCNNMamba(nn.Module):
         self.final_norm = nn.LayerNorm(self.embed_dim)
         
         # ==========================================
-        # 4. Attention Pooling & Classifier
+        # 4. Classifier
         # ==========================================
-        self.attn_pool = AttentionPooling(self.embed_dim) # Replaces Average Pooling
-        
         self.classifier = nn.Sequential(
             nn.Linear(self.embed_dim, config['n_classes'])
         )
@@ -174,8 +142,8 @@ class HybridCNNMamba(nn.Module):
         x = self.cnn(x)  # Shape: [B, C, F, T]
         
         # 2. SNTL-NTU FREQUENCY SCANNING TRICK
-        # We permute so Frequency (F) becomes the Sequence Length!
-        x = x.permute(0, 2, 1, 3) # Shape becomes: [B, F, C, T]
+        # We permute so Frequency (F) becomes the Sequence Length
+        x = x.permute(0, 2, 1, 3) 
         B, F, C, T = x.shape
         
         # Flatten Channels and Time into a single feature vector per frequency band
@@ -186,7 +154,7 @@ class HybridCNNMamba(nn.Module):
         
         # ---Pre-Mamba Global Self-Attention ---
         attn_out, _ = self.pre_attn(x, x, x)
-        x = x + self.pre_attn_norm(attn_out) # Residual bypass lane!
+        x = x + self.pre_attn_norm(attn_out) # Residual bypass lane
         # --------------------------------------------
         
         # 3. Mamba Sequence Modeling (Scanning bottom-to-top frequencies)
@@ -195,8 +163,8 @@ class HybridCNNMamba(nn.Module):
             
         x = self.final_norm(x)
         
-        # 4. Attention Pooling
-        x = self.attn_pool(x) 
+        # 4. REVERTED: Global Average Pooling over the Frequency Sequence
+        x = x.mean(dim=1) 
         
         # 5. Classification
         logits = self.classifier(x) 
@@ -211,6 +179,6 @@ def get_model(n_classes, n_mels, target_length, embed_dim, depth, patch_size, d_
         'target_length': target_length,
         'embed_dim': embed_dim,
         'depth': depth,
-        'd_state': d_state, 
+        'd_state': d_state,
     }
     return HybridCNNMamba(config)
