@@ -34,6 +34,7 @@ class FineTuneStudentModule(pl.LightningModule):
             patch_size=config.patch_size
         )
 
+        # 2. THE HEAD SURGERY: Load Pre-Trained Weights
         if hasattr(config, 'pretrained_ckpt') and config.pretrained_ckpt and os.path.exists(config.pretrained_ckpt):
             print(f"\n Performing 'Head Surgery' - Loading backbone from: {config.pretrained_ckpt}")
             ckpt = torch.load(config.pretrained_ckpt, map_location="cpu")
@@ -43,6 +44,7 @@ class FineTuneStudentModule(pl.LightningModule):
             filtered_dict = {}
             
             for k, v in pretrained_dict.items():
+                # Lightning saves weights with 'student.' prefix, we strip it to match the raw model
                 clean_k = k.replace("student.", "") 
                 
                 # Only load weights if the shapes perfectly match (This automatically drops the 50-class head!)
@@ -57,12 +59,12 @@ class FineTuneStudentModule(pl.LightningModule):
         else:
             print("\n No valid pre-trained checkpoint found. Training from scratch!\n")
 
-        # 3. Augmentations (Keep them active to prevent overfitting!)
+        # 3. Augmentations
         self.freq_mask = T.FrequencyMasking(freq_mask_param=48)
         self.time_mask = T.TimeMasking(time_mask_param=15)
         self.mixup_alpha = 0.3 
 
-        # Metadata
+        # Metadata for DCASE Logging
         self.device_ids = ['a', 'b', 'c', 's1', 's2', 's3', 's4', 's5', 's6']
         self.label_ids = ['airport', 'bus', 'metro', 'metro_station', 'park',
                           'public_square', 'shopping_mall', 'street_pedestrian',
@@ -150,21 +152,32 @@ class FineTuneStudentModule(pl.LightningModule):
         devices = batch[4] if len(batch) > 4 else batch[3]
         
         y_hat = self.student(x)
+
         samples_loss = F.cross_entropy(y_hat, labels, reduction="none")
         _, preds = torch.max(y_hat, dim=1)
-        n_correct = (preds == labels)
+        n_correct_per_sample = (preds == labels)
 
         results = {
             "loss": samples_loss.mean(),
-            "n_correct": n_correct.sum(),
+            "n_correct": n_correct_per_sample.sum(),
             "n_pred": torch.as_tensor(len(labels), device=self.device)
         }
+
+        # --- DEVICE LOGGING ---
         for i, d in enumerate(devices):
             results[f"devloss.{d}"] = results.get(f"devloss.{d}", torch.as_tensor(0., device=self.device)) + samples_loss[i]
             results[f"devcnt.{d}"] = results.get(f"devcnt.{d}", torch.as_tensor(0., device=self.device)) + 1
-            results[f"devn_correct.{d}"] = results.get(f"devn_correct.{d}", torch.as_tensor(0., device=self.device)) + n_correct[i]
+            results[f"devn_correct.{d}"] = results.get(f"devn_correct.{d}", torch.as_tensor(0., device=self.device)) + n_correct_per_sample[i]
+
+        # --- CLASS LOGGING ---
+        for i, lbl_index in enumerate(labels):
+            lbl_name = self.label_ids[lbl_index]
+            results[f"lblloss.{lbl_name}"] = results.get(f"lblloss.{lbl_name}", torch.as_tensor(0., device=self.device)) + samples_loss[i]
+            results[f"lbln_correct.{lbl_name}"] = results.get(f"lbln_correct.{lbl_name}", torch.as_tensor(0., device=self.device)) + n_correct_per_sample[i]
+            results[f"lblcnt.{lbl_name}"] = results.get(f"lblcnt.{lbl_name}", torch.as_tensor(0., device=self.device)) + 1
 
         self.validation_step_outputs.append({k: v.cpu() for k, v in results.items()})
+        return samples_loss.mean()
 
     def on_validation_epoch_end(self):
         outputs = {}
@@ -173,21 +186,50 @@ class FineTuneStudentModule(pl.LightningModule):
                 if k not in outputs:
                     outputs[k] = []
                 outputs[k].append(v)
+                
         for k in outputs:
             outputs[k] = torch.stack(outputs[k])
 
         avg_loss = outputs["loss"].mean()
-        
+        acc = outputs["n_correct"].sum() / outputs["n_pred"].sum()
+        logs = {"acc": acc, "loss": avg_loss}
+
         for d in self.device_ids:
             dev_cnt = outputs.get(f"devcnt.{d}", torch.as_tensor([0.])).sum()
             if dev_cnt > 0:
-                pass # You can log per device acc here if needed
-                
-        macro_acc = outputs["n_correct"].sum() / outputs["n_pred"].sum() 
+                logs[f"acc.{d}"] = outputs.get(f"devn_correct.{d}", torch.as_tensor([0.])).sum() / dev_cnt
+            
+            grp = self.device_groups[d]
+            logs[f"acc.{grp}"] = logs.get(f"acc.{grp}", 0.) + outputs.get(f"devn_correct.{d}", torch.as_tensor([0.])).sum()
+            logs[f"count.{grp}"] = logs.get(f"count.{grp}", 0.) + dev_cnt
+
+        for grp in set(self.device_groups.values()):
+            if logs.get(f"count.{grp}", 0) > 0:
+                logs[f"acc.{grp}"] /= logs[f"count.{grp}"]
+
+        label_accs = []
+        for lbl in self.label_ids:
+            denom = outputs.get(f"lblcnt.{lbl}", torch.as_tensor([0.])).sum()
+            if denom > 0:
+                l_acc = outputs.get(f"lbln_correct.{lbl}", torch.as_tensor([0.])).sum() / denom
+                logs[f"acc.{lbl}"] = l_acc
+                label_accs.append(l_acc)
+
+        if label_accs:
+            logs["macro_avg_acc"] = torch.mean(torch.stack(label_accs))
+        else:
+            logs["macro_avg_acc"] = acc
+
+        # --- SAFELY LOG TO WANDB ---
+        macro_acc = logs.pop("macro_avg_acc", 0.0) 
+        logs.pop("loss", None)
         
+        self.log_dict({f"val/{k}": v for k, v in logs.items()}, sync_dist=True)
         self.log("val/loss", avg_loss, sync_dist=True, prog_bar=True)
         self.log("val/macro_avg_acc", macro_acc, sync_dist=True, prog_bar=True)
+        
         self.validation_step_outputs.clear()
+
 
 def train(config):
     wandb_logger = WandbLogger(project=config.project_name, config=vars(config), name=config.experiment_name)
@@ -201,7 +243,6 @@ def train(config):
     )
 
     roll_samples = int(44100 * config.roll_sec)
-    # BACK TO DCASE DATASET!
     train_dl = DataLoader(
         get_training_set(split=config.subset, roll=roll_samples), 
         num_workers=config.num_workers, batch_size=config.batch_size, shuffle=True, drop_last=True
@@ -230,7 +271,6 @@ if __name__ == '__main__':
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--patch_size", type=int, default=4)
     
-    # LOWER LEARNING RATE FOR FINE-TUNING!
     parser.add_argument("--lr", type=float, default=1e-4)              
     parser.add_argument("--warmup_steps", type=int, default=500)       
     parser.add_argument("--n_epochs", type=int, default=150) 
@@ -241,8 +281,6 @@ if __name__ == '__main__':
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--precision", type=str, default="16-mixed")
     parser.add_argument("--check_val_every_n_epoch", type=int, default=1)
-    
-    # 25% DCASE SUBSET
     parser.add_argument("--subset", type=int, default=25)              
     parser.add_argument("--n_classes", type=int, default=10)
     parser.add_argument("--roll_sec", type=float, default=0.1)          
