@@ -56,14 +56,18 @@ class ESC50PretrainDataset(Dataset):
         mel = self.mel_transform(waveform)
         mel = 10.0 * torch.log10(mel + 1e-8)
         
-        # Force strict shape matching [1, 256, 33] for the Mamba layers
+        # Force strict shape matching [C, Freq, Time]
         target_frames = 33
         if mel.shape[-1] < target_frames:
             mel = F.pad(mel, (0, target_frames - mel.shape[-1]))
         elif mel.shape[-1] > target_frames:
             mel = mel[:, :, :target_frames]
             
-        mel = mel.unsqueeze(0) # Add channel dim
+        # --- THE FIX ---
+        # torchaudio.load already returns [Channels, Time] which becomes [Channels, Mels, Time]
+        # We just forcefully slice the first channel in case of weird stereo files.
+        # This guarantees shape is [1, 256, 33] instead of accidentally making it 4D.
+        mel = mel[0:1, :, :] 
         
         # Return Fake DCASE Tuple
         return mel, filename, label, "a", "none"
@@ -148,7 +152,8 @@ def train(config):
 
     trainer = pl.Trainer(
         max_epochs=config.n_epochs, logger=wandb_logger, accelerator="gpu", devices=config.devices,
-        precision=config.precision, callbacks=[checkpoint_callback]
+        precision=config.precision, callbacks=[checkpoint_callback],
+        gradient_clip_val=1.0
     )
 
     trainer.fit(pl_module, train_dataloaders=train_dl, val_dataloaders=val_dl)
