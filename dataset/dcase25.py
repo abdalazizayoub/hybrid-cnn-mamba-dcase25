@@ -29,7 +29,7 @@ class DCASE25Dataset(Dataset):
     """
     DCASE'25 Dataset: Generates SNTL-NTU Ultra-High Resolution Spectrograms natively.
     """
-    def __init__(self, meta_csv: str, roll_samples: int = 0):
+    def __init__(self, meta_csv: str, roll_samples: int = 0, n_mels: int = 128):
         df = pd.read_csv(meta_csv, sep="\t")
         df["filename"] = df["filename"].str.replace("/", os.sep)        
 
@@ -54,7 +54,7 @@ class DCASE25Dataset(Dataset):
             n_fft=8192,             
             win_length=8192,        
             hop_length=1364,        
-            n_mels=256              
+            n_mels=n_mels       # <-- DYNAMIC! Defaults to 128 for the Deep Mamba
         )
         self.amp_to_db = torchaudio.transforms.AmplitudeToDB(stype='power')
 
@@ -73,7 +73,7 @@ class DCASE25Dataset(Dataset):
             shift = np.random.randint(-self.roll_samples, self.roll_samples + 1)
             waveform = waveform.roll(shift, dims=1)
 
-        # Output shape will be [1, 256, 33]
+        # Output shape will be [1, n_mels, 33]
         x = self.mel_transform(waveform)
         x = self.amp_to_db(x)
         
@@ -108,7 +108,7 @@ def download_split_file(split_name: str):
     return split_file
 
 
-def get_dataset_split(meta_csv: str, split_csv: str, device: Optional[str] = None, roll: int = 0) -> Dataset:
+def get_dataset_split(meta_csv: str, split_csv: str, device: Optional[str] = None, roll: int = 0, n_mels: int = 128) -> Dataset:
     """Filters the dataset safely using the official CP-JKU split logic."""
     meta = pd.read_csv(meta_csv, sep="\t")
     split_files = pd.read_csv(split_csv, sep="\t")["filename"].values
@@ -119,17 +119,17 @@ def get_dataset_split(meta_csv: str, split_csv: str, device: Optional[str] = Non
     if device:
         subset_indices = meta.loc[subset_indices, :].query("source_label == @device").index.tolist()
         
-    return SubsetDataset(DCASE25Dataset(meta_csv, roll_samples=roll), subset_indices)
+    return SubsetDataset(DCASE25Dataset(meta_csv, roll_samples=roll, n_mels=n_mels), subset_indices)
 
 
-def get_training_set(split: int = 25, device: Optional[str] = None, roll: int = 0) -> Dataset:
+def get_training_set(split: int = 25, device: Optional[str] = None, roll: int = 0, n_mels: int = 128) -> Dataset:
     """Returns the perfectly isolated training dataset."""
     assert str(split) in ("5", "10", "25", "50", "100"), "split must be in {5, 10, 25, 50, 100}"
     subset_file = download_split_file(f"split{split}.csv")
-    return get_dataset_split(dataset_config["meta_csv"], subset_file, device, roll=roll)
+    return get_dataset_split(dataset_config["meta_csv"], subset_file, device, roll=roll, n_mels=n_mels)
 
 
-def get_test_set(device: Optional[str] = None) -> Dataset:
+def get_test_set(device: Optional[str] = None, n_mels: int = 128) -> Dataset:
     """Returns the perfectly isolated test dataset."""
     test_split_file = download_split_file(dataset_config["test_split_csv"])
-    return get_dataset_split(dataset_config["meta_csv"], test_split_file, device, roll=0)
+    return get_dataset_split(dataset_config["meta_csv"], test_split_file, device, roll=0, n_mels=n_mels)
