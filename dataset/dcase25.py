@@ -37,7 +37,6 @@ class DCASE25Dataset(Dataset):
         self.devices = df["source_label"].values
         self.cities = LabelEncoder().fit_transform(df["identifier"].apply(lambda loc: loc.split("-")[0]))
         
-        # Hardcoding the 10 labels to ensure they map identically every single time
         self.classes = ['airport', 'bus', 'metro', 'metro_station', 'park',
                         'public_square', 'shopping_mall', 'street_pedestrian',
                         'street_traffic', 'tram']
