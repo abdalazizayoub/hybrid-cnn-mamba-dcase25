@@ -4,7 +4,6 @@ import sys
 import os
 import warnings
 
-# Adjust path for local imports
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 import AUM.src.models.mamba_models as mamba_models  # Import Audio Mamba models
 
@@ -15,20 +14,23 @@ class AudioMambaModel(nn.Module):
         # Audio Mamba configuration
         self.spectrogram_size = (config['n_mels'], config['target_length']) 
         
-        # Parse patch_size whether it comes as a string or a list/tuple
-        if isinstance(config['patch_size'], str):
+        # 1. RECTANGULAR PATCHING & OVERLAPPING STRIDES
+        if isinstance(config['patch_size'], int):
+            self.patch_size = (16, config['patch_size']) 
+        elif isinstance(config['patch_size'], str):
             patch_values = [int(v.strip()) for v in config['patch_size'].split(',')]
+            self.patch_size = tuple(patch_values) if len(patch_values) > 1 else (16, patch_values[0])
         else:
-            patch_values = list(config['patch_size'])
+            self.patch_size = tuple(config['patch_size'])
             
-        self.patch_size = tuple(patch_values)
-        self.strides = self.patch_size # Assuming strides equal patch size
+        # 50% Overlap! (This increases MACs but keeps parameters identical)
+        self.strides = (self.patch_size[0] // 2, self.patch_size[1] // 2) 
         
         self.embed_dim = config['embed_dim']
         self.depth = config['depth']
         
-        # --- NEW: Extract d_state and pack it into ssm_cfg ---
-        d_state = config.get('d_state', 16) # Default to 16 if not provided
+        # 2. INCREASED WORKING MEMORY
+        d_state = config.get('d_state', 24) # Bumped default from 16 to 24 to use free KB!
         ssm_config = {'d_state': d_state}
         
         bimamba_type = 'v2' 
@@ -37,7 +39,7 @@ class AudioMambaModel(nn.Module):
         self.aum_model = mamba_models.AudioMamba(
             spectrogram_size=self.spectrogram_size,
             patch_size=self.patch_size,
-            strides=self.strides,
+            strides=self.strides,         # <--- Now overlapping!
             embed_dim=self.embed_dim,
             num_classes=config['n_classes'],
             ssm_cfg=ssm_config,  
@@ -48,12 +50,7 @@ class AudioMambaModel(nn.Module):
             aum_pretrain_path=None, 
             bimamba_type=bimamba_type,
             if_bidirectional=True,
-            
-            # --- CRITICAL FIX ---
-            # Disable absolute positional embeddings to bypass the problematic initialization
             if_abs_pos_embed=False,
-            # Ensure RoPE is also disabled for simplest initialization
-            # --------------------
         )
         
         # Remove the final classification head
@@ -77,21 +74,13 @@ class AudioMambaModel(nn.Module):
                 nn.init.constant_(module.bias, 0)
     
     def forward(self, x):
-        """
-        Forward pass for Audio Mamba
-        x: input spectrogram of shape (batch, 1, n_mels, target_length)
-        """
-        # Pass through Audio Mamba backbone
         features = self.aum_model.forward_features(x)
-        
-        # Classification
         logits = self.classifier(features)
         return logits
 
-
-def get_model(n_classes, n_mels, target_length, embed_dim, depth, patch_size, d_state=16):
+def get_model(n_classes, n_mels, target_length, embed_dim, depth, patch_size, d_state=24):
     """
-    Get Audio Mamba model for DCASE25 Task 1, using parameters passed from train_distillation.py
+    Get Audio Mamba model for DCASE25 Task 1
     """
     config = {
         'n_classes': n_classes,
