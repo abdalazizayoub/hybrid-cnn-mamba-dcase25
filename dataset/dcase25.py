@@ -29,7 +29,7 @@ class DCASE25Dataset(Dataset):
     """
     DCASE'25 Dataset: Generates SNTL-NTU Ultra-High Resolution Spectrograms natively.
     """
-    def __init__(self, meta_csv: str, roll_samples: int = 0, n_mels: int = 128):
+    def __init__(self, meta_csv: str, roll_samples: int = 0, n_mels: int = 256):
         df = pd.read_csv(meta_csv, sep="\t")
         df["filename"] = df["filename"].str.replace("/", os.sep)        
 
