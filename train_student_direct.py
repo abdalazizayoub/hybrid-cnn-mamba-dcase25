@@ -24,22 +24,20 @@ class DirectStudentModule(pl.LightningModule):
         self.save_hyperparameters(config)
         self.config = config
 
-        # 1. Initialize the Deeper, 128-Mel Student Model
         self.student = get_student_model(
             n_classes=config.n_classes,
             n_mels=config.n_mels,         
             target_length=33,   
             embed_dim=config.embed_dim,   
             depth=config.depth,           
-            patch_size=config.patch_size
+            patch_size=config.patch_size,
+            d_state=config.d_state
         )
 
-        # 2. Augmentations
         self.freq_mask = T.FrequencyMasking(freq_mask_param=24) 
         self.time_mask = T.TimeMasking(time_mask_param=10)
         self.mixup_alpha = 0.3 
 
-        # Metadata for Comprehensive DCASE Logging
         self.device_ids = ['a', 'b', 'c', 's1', 's2', 's3', 's4', 's5', 's6']
         self.label_ids = ['airport', 'bus', 'metro', 'metro_station', 'park',
                           'public_square', 'shopping_mall', 'street_pedestrian',
@@ -97,7 +95,6 @@ class DirectStudentModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, _, labels, _, _ = batch
         
-        # The Safety Check
         if x.shape[2] != self.config.n_mels:
             raise ValueError(f"CRITICAL ERROR: Dataloader outputting {x.shape[2]} Mels, but model expects {self.config.n_mels} Mels. Please update your dcase25.py dataset script!")
 
@@ -135,13 +132,11 @@ class DirectStudentModule(pl.LightningModule):
             "n_pred": torch.as_tensor(len(labels), device=self.device)
         }
 
-        # --- DEVICE LOGGING ---
         for i, d in enumerate(devices):
             results[f"devloss.{d}"] = results.get(f"devloss.{d}", torch.as_tensor(0., device=self.device)) + samples_loss[i]
             results[f"devcnt.{d}"] = results.get(f"devcnt.{d}", torch.as_tensor(0., device=self.device)) + 1
             results[f"devn_correct.{d}"] = results.get(f"devn_correct.{d}", torch.as_tensor(0., device=self.device)) + n_correct_per_sample[i]
 
-        # --- CLASS LOGGING ---
         for i, lbl_index in enumerate(labels):
             lbl_name = self.label_ids[lbl_index]
             results[f"lblloss.{lbl_name}"] = results.get(f"lblloss.{lbl_name}", torch.as_tensor(0., device=self.device)) + samples_loss[i]
@@ -166,7 +161,6 @@ class DirectStudentModule(pl.LightningModule):
         acc = outputs["n_correct"].sum() / outputs["n_pred"].sum()
         logs = {"acc": acc, "loss": avg_loss}
 
-        # --- AGGREGATE DEVICES & GROUPS (Seen/Unseen) ---
         for d in self.device_ids:
             dev_cnt = outputs.get(f"devcnt.{d}", torch.as_tensor([0.])).sum()
             if dev_cnt > 0:
@@ -180,7 +174,6 @@ class DirectStudentModule(pl.LightningModule):
             if logs.get(f"count.{grp}", 0) > 0:
                 logs[f"acc.{grp}"] /= logs[f"count.{grp}"]
 
-        # --- AGGREGATE CLASSES FOR MACRO AVG ---
         label_accs = []
         for lbl in self.label_ids:
             denom = outputs.get(f"lblcnt.{lbl}", torch.as_tensor([0.])).sum()
@@ -194,7 +187,6 @@ class DirectStudentModule(pl.LightningModule):
         else:
             logs["macro_avg_acc"] = acc
 
-        # --- SAFELY LOG TO WANDB ---
         macro_acc = logs.pop("macro_avg_acc", 0.0) 
         logs.pop("loss", None)
         
@@ -237,20 +229,20 @@ def train(config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Deep Mamba Architecture on DCASE')
     parser.add_argument("--project_name", type=str, default="DCASE25_Hybrid_Architecture")
-    parser.add_argument("--experiment_name", type=str, default="Hybrid_128Mels_Depth5")
+    parser.add_argument("--experiment_name", type=str, default="Hybrid_256Mels_Depth5")
     
-    # --- DEEP ARCHITECTURE SETTINGS ---
-    parser.add_argument("--n_mels", type=int, default=128) 
-    parser.add_argument("--embed_dim", type=int, default=24) 
-    parser.add_argument("--depth", type=int, default=5) 
+    parser.add_argument("--n_mels", type=int, default=256) 
+    parser.add_argument("--embed_dim", type=int, default=20) 
+    parser.add_argument("--depth", type=int, default=4) 
     parser.add_argument("--patch_size", type=int, default=4)
+    parser.add_argument("--d_state", type=int, default=32)
     
     parser.add_argument("--lr", type=float, default=0.001)              
     parser.add_argument("--warmup_steps", type=int, default=1000)       
     parser.add_argument("--n_epochs", type=int, default=200) 
     parser.add_argument("--weight_decay", type=float, default=1e-3) 
     
-    parser.add_argument("--batch_size", type=int, default=256)          
+    parser.add_argument("--batch_size", type=int, default=32)          
     parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--precision", type=str, default="16-mixed")
