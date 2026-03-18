@@ -106,12 +106,16 @@ class DirectStudentModule(pl.LightningModule):
             index = torch.randperm(x.size(0)).to(x.device)
             x = lam * x + (1 - lam) * x[index]
             y_hat = self.student(x)
-            loss1 = F.cross_entropy(y_hat, labels)
-            loss2 = F.cross_entropy(y_hat, labels[index])
+            
+            # --- LABEL SMOOTHING ADDED HERE (MIXUP BRANCH) ---
+            loss1 = F.cross_entropy(y_hat, labels, label_smoothing=0.1)
+            loss2 = F.cross_entropy(y_hat, labels[index], label_smoothing=0.1)
             loss = lam * loss1 + (1 - lam) * loss2
         else:
             y_hat = self.student(x)
-            loss = F.cross_entropy(y_hat, labels)
+            
+            # --- LABEL SMOOTHING ---
+            loss = F.cross_entropy(y_hat, labels, label_smoothing=0.1)
 
         self.log("train/loss", loss, on_step=True, on_epoch=True, batch_size=x.size(0))
         self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"], batch_size=x.size(0))
