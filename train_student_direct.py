@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torchaudio.transforms as T
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, StochasticWeightAveraging
 from pytorch_lightning.loggers import WandbLogger
 import transformers
 
@@ -24,15 +24,17 @@ class DirectStudentModule(pl.LightningModule):
         self.save_hyperparameters(config)
         self.config = config
 
-        self.student = get_student_model(
-            n_classes=config.n_classes,
-            n_mels=config.n_mels,         
-            target_length=33,   
-            embed_dim=config.embed_dim,   
-            depth=config.depth,           
-            patch_size=config.patch_size,
-            d_state=config.d_state
-        )
+        model_kwargs = {
+            'n_classes': config.n_classes,
+            'n_mels': config.n_mels,         
+            'target_length': 33,   
+            'embed_dim': config.embed_dim,   
+            'depth': config.depth,           
+            'patch_size': config.patch_size,
+            'd_state': config.d_state,
+            'd_conv': config.d_conv  
+        }
+        self.student = get_student_model(**model_kwargs)
 
         self.freq_mask = T.FrequencyMasking(freq_mask_param=24) 
         self.time_mask = T.TimeMasking(time_mask_param=10)
@@ -106,12 +108,16 @@ class DirectStudentModule(pl.LightningModule):
             index = torch.randperm(x.size(0)).to(x.device)
             x = lam * x + (1 - lam) * x[index]
             y_hat = self.student(x)
-            loss1 = F.cross_entropy(y_hat, labels)
-            loss2 = F.cross_entropy(y_hat, labels[index])
+            
+            # --- LABEL SMOOTHING ADDED HERE (MIXUP BRANCH) ---
+            loss1 = F.cross_entropy(y_hat, labels, label_smoothing=0.1)
+            loss2 = F.cross_entropy(y_hat, labels[index], label_smoothing=0.1)
             loss = lam * loss1 + (1 - lam) * loss2
         else:
             y_hat = self.student(x)
-            loss = F.cross_entropy(y_hat, labels)
+            
+            # --- LABEL SMOOTHING ---
+            loss = F.cross_entropy(y_hat, labels, label_smoothing=0.1)
 
         self.log("train/loss", loss, on_step=True, on_epoch=True, batch_size=x.size(0))
         self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"], batch_size=x.size(0))
@@ -208,6 +214,12 @@ def train(config):
     )
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
+    # --- THE SWA CHEAT CODE ---
+    swa_callback = StochasticWeightAveraging(
+        swa_lrs=1e-4,        # Slightly elevated LR so it bounces around the loss minima
+        swa_epoch_start=0.8  # Kicks in at 80% of total epochs
+    )
+
     roll_samples = int(44100 * config.roll_sec)
     
     train_dl = DataLoader(
@@ -221,7 +233,8 @@ def train(config):
     trainer = pl.Trainer(
         max_epochs=config.n_epochs, logger=wandb_logger, accelerator="gpu", devices=config.devices,
         precision=config.precision, check_val_every_n_epoch=config.check_val_every_n_epoch,
-        callbacks=[checkpoint_callback, lr_monitor], gradient_clip_val=1.0  
+        # SWA CALLBACK ADDED HERE
+        callbacks=[checkpoint_callback, lr_monitor, swa_callback], gradient_clip_val=1.0  
     )
 
     trainer.fit(pl_module, train_dataloaders=train_dl, val_dataloaders=val_dl)
@@ -236,6 +249,7 @@ if __name__ == '__main__':
     parser.add_argument("--depth", type=int, default=4) 
     parser.add_argument("--patch_size", type=int, default=4)
     parser.add_argument("--d_state", type=int, default=32)
+    parser.add_argument("--d_conv", type=int, default=4)  # <-- Set to 4 to avoid Causal_conv1d crash
     
     parser.add_argument("--lr", type=float, default=0.001)              
     parser.add_argument("--warmup_steps", type=int, default=1000)       
