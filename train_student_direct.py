@@ -32,7 +32,6 @@ class DirectStudentModule(pl.LightningModule):
             'depth': config.depth,           
             'patch_size': config.patch_size,
             'd_state': config.d_state,
-            'd_conv': config.d_conv  
         }
         self.student = get_student_model(**model_kwargs)
 
@@ -249,7 +248,6 @@ if __name__ == '__main__':
     parser.add_argument("--depth", type=int, default=4) 
     parser.add_argument("--patch_size", type=int, default=4)
     parser.add_argument("--d_state", type=int, default=32)
-    parser.add_argument("--d_conv", type=int, default=4)  # <-- Set to 4 to avoid Causal_conv1d crash
     
     parser.add_argument("--lr", type=float, default=0.001)              
     parser.add_argument("--warmup_steps", type=int, default=1000)       
