@@ -51,7 +51,7 @@ class ConvBlock(nn.Module):
         x = self.conv(x)
         x = self.bn(x)
         x = self.act(x)
-        x = self.se(x)
+        #x = self.se(x)
         return x
 
 class HybridCNNMamba(nn.Module):
