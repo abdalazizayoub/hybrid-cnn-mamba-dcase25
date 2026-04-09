@@ -296,7 +296,11 @@ def train(config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--ckpt_path", type=str, default="/home/abdalaziz-ayoub/Thesis_Hybrid_CNN_Mamba/checkpoints/Hybrid_Base_TTA/best-student-epoch=86-val_acc=0.48.ckpt")
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        default="/home/abdalaziz-ayoub/Thesis_Hybrid_CNN_Mamba/checkpoints/Hybrid_256mels_32state/best-student-epoch=84-val_acc=0.48.ckpt",
+    )
     parser.add_argument("--project_name", type=str, default="DCASE25_Task1")
     parser.add_argument("--experiment_name", type=str, default="Hybrid_Device_Finetune")
     
