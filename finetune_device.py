@@ -14,7 +14,7 @@ from dataset.dcase25 import get_training_set, get_test_set
 from helpers.init import worker_init_fn
 from helpers import complexity
 
-from models.hybrid_net import get_model as get_student_model
+# Removed static import of hybrid_net. It is now handled dynamically!
 from models.multi_device_model import MultiDeviceModelContainer
 
 
@@ -40,15 +40,24 @@ class PLModule(pl.LightningModule):
             's4': "unseen", 's5': "unseen", 's6': "unseen"
         }
 
+        # ==========================================
+        #  DYNAMIC ARCHITECTURE ROUTING
+        # ==========================================
+        model_type = getattr(config, 'model_type', 'mamba').lower()
+        if model_type == 'gru':
+            from models.hybrid_gru import get_model as get_student_model
+        else:
+            from models.hybrid_net import get_model as get_student_model
         model_kwargs = {
             'n_classes': config.n_classes,
             'n_mels': config.n_mels,         
             'target_length': 33,   
             'embed_dim': config.embed_dim,   
             'depth': config.depth,           
-            'patch_size': config.patch_size,
-            'd_state': config.d_state,
+            'patch_size': getattr(config, 'patch_size', 4),
+            'd_state': getattr(config, 'd_state', 32),
         }
+        
         base_model = get_student_model(**model_kwargs)
 
         if base_model_state_dict is not None:
@@ -228,6 +237,7 @@ class PLModule(pl.LightningModule):
 def train(config):
     base_model_state_dict = None
     if config.ckpt_path is not None:
+        print(f"\n Extracting Weights from Checkpoint: {config.ckpt_path}")
         ckpt = torch.load(config.ckpt_path, map_location="cpu")
         base_model_state_dict = {
             k.replace("student.", ""): v for k, v in ckpt["state_dict"].items() if k.startswith("student.")
@@ -244,6 +254,7 @@ def train(config):
     )
 
     for device_id in pl_module.train_device_ids:
+        print(f"\n🎧 Spinning up Specialist Trainer for Device: {device_id.upper()}")
         train_ds = get_training_set(config.subset, device=device_id, roll=roll_samples)
         train_dl = DataLoader(
             dataset=train_ds, worker_init_fn=worker_init_fn,
@@ -279,6 +290,7 @@ def train(config):
 
         trainer.fit(pl_module, train_dl, test_dl)
 
+    print("\n🏁 Specialist Fine-Tuning Complete. Launching Global Test Suite...")
     test_dl = DataLoader(
         dataset=get_test_set(device=None),
         worker_init_fn=worker_init_fn,
@@ -296,6 +308,12 @@ def train(config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
+    # ==========================================
+    # DYNAMIC ARGUMENTS
+    # ==========================================
+    parser.add_argument("--model_type", type=str, default="mamba", choices=["mamba", "gru"], 
+                        help="Choose the backbone architecture: 'mamba' or 'gru'")
+    
     parser.add_argument(
         "--ckpt_path",
         type=str,
