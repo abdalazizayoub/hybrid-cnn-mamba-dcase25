@@ -156,7 +156,7 @@ class EvaluationModule(pl.LightningModule):
         # STATISTICAL CONFIDENCE INTERVAL CALCULATIONS
         # -----------------------------------------------------
         def calc_ci(accuracy, n):
-            """Calculates the 95% Confidence Interval Margin of Error"""
+            """Calculates the 95% Confidence Interval Margin of Error for a given accuracy and sample size using the normal approximation."""
             if n <= 0: 
                 return 0.0
             p = max(0.0, min(1.0, float(accuracy)))
