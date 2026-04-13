@@ -15,8 +15,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 from dataset.dcase25 import get_training_set, get_test_set
-from models.hybrid_net import get_model as get_student_model
-from models.hybrid_gru import get_model as get_student_model
+# FIX: Import both models with distinct names
+from models.hybrid_net import get_model as get_mamba_model
+from models.hybrid_gru import get_model as get_gru_model
 from helpers.complexity import get_torch_macs_memory
 
 class DirectStudentModule(pl.LightningModule):
@@ -35,7 +36,14 @@ class DirectStudentModule(pl.LightningModule):
             'd_state': config.d_state,
             'd_conv': config.d_conv  
         }
-        self.student = get_student_model(**model_kwargs)
+        
+        # DYNAMIC ROUTING: Select the architecture based on the config
+        if config.sequence_engine.lower() == "mamba":
+            self.student = get_mamba_model(**model_kwargs)
+        elif config.sequence_engine.lower() == "gru":
+            self.student = get_gru_model(**model_kwargs)
+        else:
+            raise ValueError(f"Unknown sequence_engine: {config.sequence_engine}. Choose 'mamba' or 'gru'.")
 
         self.freq_mask = T.FrequencyMasking(freq_mask_param=24) 
         self.time_mask = T.TimeMasking(time_mask_param=10)
@@ -63,9 +71,10 @@ class DirectStudentModule(pl.LightningModule):
         
         print("\n" + "="*60)
         print(" DCASE 2025 TASK 1 COMPLEXITY REPORT 🚀")
+        print(f"Sequence Engine       : {self.config.sequence_engine.upper()}")
         print(f"Current FP32 Size     : {current_kb:.2f} KB")
         print(f"FP16 Inference Size   : {fp16_kb:.2f} KB (Limit: {max_kb:.2f} KB)")
-        print(f"Model Depth (Mamba)   : {self.config.depth} Layers")
+        print(f"Model Depth           : {self.config.depth} Layers")
         print(f"Spectrogram Mels      : {self.config.n_mels} Bins")
         
         compliant = fp16_bytes <= max_bytes
@@ -77,6 +86,7 @@ class DirectStudentModule(pl.LightningModule):
         
         if self.logger and hasattr(self.logger.experiment, 'config'):
             self.logger.experiment.config.update({
+                "Sequence_Engine": self.config.sequence_engine,
                 "Model_MACs_Millions": mmacs,
                 "Model_Size_FP16_KB": fp16_kb,
                 "DCASE_Compliant": compliant
@@ -250,6 +260,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Deep Mamba Architecture on DCASE')
     parser.add_argument("--project_name", type=str, default="DCASE25_Hybrid_Architecture")
     parser.add_argument("--experiment_name", type=str, default="Hybrid_256Mels_Depth5")
+    
+    parser.add_argument("--sequence_engine", type=str, default="mamba", choices=['mamba', 'gru'], 
+                        help="Choose 'mamba' for HybridCNNMamba or 'gru' for HybridCNNRNN")
     
     parser.add_argument("--n_mels", type=int, default=256) 
     parser.add_argument("--embed_dim", type=int, default=20) 
