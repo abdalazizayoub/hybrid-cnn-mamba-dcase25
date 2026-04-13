@@ -15,7 +15,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 from dataset.dcase25 import get_training_set, get_test_set
-# FIX: Import both models with distinct names
 from models.hybrid_net import get_model as get_mamba_model
 from models.hybrid_gru import get_model as get_gru_model
 from helpers.complexity import get_torch_macs_memory
@@ -134,23 +133,8 @@ class DirectStudentModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, _, labels, devices, _ = batch
         
-        # ==========================================
-        # ZERO-COST TRICK: TEST-TIME AUGMENTATION (TTA)
-        # ==========================================
-        # 1. Normal View
-        logits_normal = self.student(x)
-        
-        # 2. Shifted Forward (+5 frames)
-        x_shifted_forward = torch.roll(x, shifts=5, dims=-1)
-        logits_forward = self.student(x_shifted_forward)
-        
-        # 3. Shifted Backward (-5 frames)
-        x_shifted_backward = torch.roll(x, shifts=-5, dims=-1)
-        logits_backward = self.student(x_shifted_backward)
-        
-        # 4. Average the logits (Ensemble effect)
-        y_hat = (logits_normal + logits_forward + logits_backward) / 3.0
-        # ==========================================
+        # Standard validation forward pass (TTA removed)
+        y_hat = self.student(x)
 
         samples_loss = F.cross_entropy(y_hat, labels, reduction="none")
         _, preds = torch.max(y_hat, dim=1)
@@ -261,6 +245,7 @@ if __name__ == '__main__':
     parser.add_argument("--project_name", type=str, default="DCASE25_Hybrid_Architecture")
     parser.add_argument("--experiment_name", type=str, default="Hybrid_256Mels_Depth5")
     
+    # NEW ARGUMENT: Allows you to switch engines dynamically
     parser.add_argument("--sequence_engine", type=str, default="mamba", choices=['mamba', 'gru'], 
                         help="Choose 'mamba' for HybridCNNMamba or 'gru' for HybridCNNRNN")
     
