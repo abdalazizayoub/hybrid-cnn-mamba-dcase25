@@ -17,6 +17,7 @@ sys.path.append(current_dir)
 from dataset.dcase25 import get_training_set, get_test_set
 from models.hybrid_net import get_model as get_mamba_model
 from models.hybrid_gru import get_model as get_gru_model
+from models.hybrid_xlstm import get_model as get_xlstm_model
 from helpers.complexity import get_torch_macs_memory
 
 class DirectStudentModule(pl.LightningModule):
@@ -41,8 +42,10 @@ class DirectStudentModule(pl.LightningModule):
             self.student = get_mamba_model(**model_kwargs)
         elif config.sequence_engine.lower() == "gru":
             self.student = get_gru_model(**model_kwargs)
+        elif config.sequence_engine.lower() == "xlstm":
+            self.student = get_xlstm_model(**model_kwargs)
         else:
-            raise ValueError(f"Unknown sequence_engine: {config.sequence_engine}. Choose 'mamba' or 'gru'.")
+            raise ValueError(f"Unknown sequence_engine: {config.sequence_engine}. Choose 'mamba', 'gru', or 'xlstm'.")
 
         self.freq_mask = T.FrequencyMasking(freq_mask_param=24) 
         self.time_mask = T.TimeMasking(time_mask_param=10)
@@ -245,9 +248,9 @@ if __name__ == '__main__':
     parser.add_argument("--project_name", type=str, default="DCASE25_Hybrid_Architecture")
     parser.add_argument("--experiment_name", type=str, default="Hybrid_256Mels_Depth5")
     
-    # NEW ARGUMENT: Allows you to switch engines dynamically
-    parser.add_argument("--sequence_engine", type=str, default="mamba", choices=['mamba', 'gru'], 
-                        help="Choose 'mamba' for HybridCNNMamba or 'gru' for HybridCNNRNN")
+    # UPDATED ARGUMENT: Now includes 'xlstm'
+    parser.add_argument("--sequence_engine", type=str, default="mamba", choices=['mamba', 'gru', 'xlstm'], 
+                        help="Choose 'mamba' for HybridCNNMamba, 'gru' for HybridCNNRNN, or 'xlstm' for HybridCNNxLSTM")
     
     parser.add_argument("--n_mels", type=int, default=256) 
     parser.add_argument("--embed_dim", type=int, default=20) 
