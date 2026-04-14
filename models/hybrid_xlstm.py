@@ -2,8 +2,17 @@ import torch
 import torch.nn as nn
 import sys
 import os
-from xlstm import xLSTMBlockStack, xLSTMBlockStackConfig, mLSTMBlockConfig, sLSTMBlockConfig
 
+try:
+    from xlstm import (
+        xLSTMBlockStack, 
+        xLSTMBlockStackConfig, 
+        mLSTMBlockConfig, 
+        mLSTMLayerConfig, 
+        sLSTMBlockConfig
+    )
+except ImportError as e:
+    raise ImportError(f"Could not import xLSTM. Ensure the 'xlstm' package is installed. Error: {e}")
 
 
 class SEBlock(nn.Module):
@@ -16,14 +25,11 @@ class SEBlock(nn.Module):
         self.gate = nn.Sigmoid()
 
     def forward(self, x):
-        # Squeeze (Global Average Pool)
         y = x.mean(dim=(2, 3), keepdim=True)
-        # Excite
         y = self.fc1(y)
         y = self.act(y)
         y = self.fc2(y)
         y = self.gate(y)
-        # Scale
         return x * y
 
 
@@ -87,24 +93,21 @@ class HybridCNNxLSTM(nn.Module):
         )
         
         # ==========================================
-        # 3. The xLSTM "Brain" (Replaces Mamba & GRU)
+        # 3. The xLSTM "Brain" 
         # ==========================================
-        # Configuring the xLSTM block stack. 
-        # We use a mix of mLSTM (matrix memory for capacity) and sLSTM (scalar memory for gating)
+        # FIXED: Using proper mLSTMLayerConfig object instead of a dict
         xlstm_config = xLSTMBlockStackConfig(
             mlstm_block=mLSTMBlockConfig(
-                mlstm=dict(conv1d_kernel_size=4) 
+                mlstm=mLSTMLayerConfig(conv1d_kernel_size=4) 
             ),
             slstm_block=sLSTMBlockConfig(),
-            context_length=f_out,  # Sequence length (Number of frequency bins remaining)
+            context_length=f_out,  
             num_blocks=self.depth, 
             embedding_dim=self.embed_dim,
-            # We enforce a small block setup to ensure it fits in 128KB
             slstm_at=[1] if self.depth > 1 else [] 
         )
         
         self.xlstm = xLSTMBlockStack(xlstm_config)
-        
         self.final_norm = nn.LayerNorm(self.embed_dim)
         
         # ==========================================
@@ -118,31 +121,28 @@ class HybridCNNxLSTM(nn.Module):
         """
         Input x: [Batch, 1, n_mels (256), target_length (33)]
         """
-        # 1. CNN Feature Extraction
         x = self.cnn(x)  
         
-        # 2. SNTL-NTU FREQUENCY SCANNING TRICK
+        # SNTL-NTU FREQUENCY SCANNING TRICK
         x = x.permute(0, 2, 1, 3) 
         B, F, C, T = x.shape
         
         x = x.reshape(B, F, C * T) 
         x = self.bridge_proj(x) 
         
-        # ==========================================
-        # 3. xLSTM Sequence Modeling
-        # ==========================================
-        # The xLSTM BlockStack processes the sequence directly
+        # xLSTM Sequence Modeling
         x = self.xlstm(x)
                 
         x = self.final_norm(x)
         
-        # 4. Global Average Pooling over the Frequency Sequence
+        # Global Average Pooling
         x = x.mean(dim=1) 
         
-        # 5. Classification
+        # Classification
         logits = self.classifier(x) 
         
         return logits
+
 
 def get_model(n_classes, n_mels, target_length, embed_dim, depth, **kwargs):
     config = {
