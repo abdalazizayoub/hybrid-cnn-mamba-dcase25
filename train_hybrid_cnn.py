@@ -49,9 +49,14 @@ class DirectStudentModule(pl.LightningModule):
         self.time_mask = T.TimeMasking(time_mask_param=10)
         self.mixup_alpha = 0.3 
         
+        # Logging configurations
         self.label_ids = ['airport', 'bus', 'metro', 'metro_station', 'park',
                           'public_square', 'shopping_mall', 'street_pedestrian',
                           'street_traffic', 'tram']
+        self.device_ids = ['a', 'b', 'c', 's1', 's2', 's3', 's4', 's5', 's6']
+        self.device_groups = {'a': "real", 'b': "real", 'c': "real",
+                              's1': "seen", 's2': "seen", 's3': "seen",
+                              's4': "unseen", 's5': "unseen", 's6': "unseen"}
         self.validation_step_outputs = []
 
     def on_train_start(self):
@@ -119,20 +124,86 @@ class DirectStudentModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, _, labels, _, _ = batch
-        y_hat = self.student(x)
-        loss = F.cross_entropy(y_hat, labels)
-        preds = torch.argmax(y_hat, dim=1)
-        acc = (preds == labels).float().mean()
+        x, _, labels, devices, _ = batch
         
-        self.validation_step_outputs.append({"loss": loss, "acc": acc})
-        return loss
+        y_hat = self.student(x)
+        samples_loss = F.cross_entropy(y_hat, labels, reduction="none")
+        _, preds = torch.max(y_hat, dim=1)
+        n_correct_per_sample = (preds == labels)
+
+        results = {
+            "loss": samples_loss.mean(),
+            "n_correct": n_correct_per_sample.sum(),
+            "n_pred": torch.as_tensor(len(labels), device=self.device)
+        }
+
+        # Track metrics per device
+        for i, d in enumerate(devices):
+            results[f"devloss.{d}"] = results.get(f"devloss.{d}", torch.as_tensor(0., device=self.device)) + samples_loss[i]
+            results[f"devcnt.{d}"] = results.get(f"devcnt.{d}", torch.as_tensor(0., device=self.device)) + 1
+            results[f"devn_correct.{d}"] = results.get(f"devn_correct.{d}", torch.as_tensor(0., device=self.device)) + n_correct_per_sample[i]
+
+        # Track metrics per class
+        for i, lbl_index in enumerate(labels):
+            lbl_name = self.label_ids[lbl_index]
+            results[f"lblloss.{lbl_name}"] = results.get(f"lblloss.{lbl_name}", torch.as_tensor(0., device=self.device)) + samples_loss[i]
+            results[f"lbln_correct.{lbl_name}"] = results.get(f"lbln_correct.{lbl_name}", torch.as_tensor(0., device=self.device)) + n_correct_per_sample[i]
+            results[f"lblcnt.{lbl_name}"] = results.get(f"lblcnt.{lbl_name}", torch.as_tensor(0., device=self.device)) + 1
+
+        self.validation_step_outputs.append({k: v.cpu() for k, v in results.items()})
+        return samples_loss.mean()
 
     def on_validation_epoch_end(self):
-        avg_loss = torch.stack([x["loss"] for x in self.validation_step_outputs]).mean()
-        avg_acc = torch.stack([x["acc"] for x in self.validation_step_outputs]).mean()
+        outputs = {}
+        for step_output in self.validation_step_outputs:
+            for k, v in step_output.items():
+                if k not in outputs:
+                    outputs[k] = []
+                outputs[k].append(v)
+                
+        for k in outputs:
+            outputs[k] = torch.stack(outputs[k])
+
+        avg_loss = outputs["loss"].mean()
+        acc = outputs["n_correct"].sum() / outputs["n_pred"].sum()
+        logs = {"acc": acc, "loss": avg_loss}
+
+        # Compute Device Accuracies
+        for d in self.device_ids:
+            dev_cnt = outputs.get(f"devcnt.{d}", torch.as_tensor([0.])).sum()
+            if dev_cnt > 0:
+                logs[f"acc.{d}"] = outputs.get(f"devn_correct.{d}", torch.as_tensor([0.])).sum() / dev_cnt
+            
+            grp = self.device_groups[d]
+            logs[f"acc.{grp}"] = logs.get(f"acc.{grp}", 0.) + outputs.get(f"devn_correct.{d}", torch.as_tensor([0.])).sum()
+            logs[f"count.{grp}"] = logs.get(f"count.{grp}", 0.) + dev_cnt
+
+        # Compute Device Group Accuracies (real, seen, unseen)
+        for grp in set(self.device_groups.values()):
+            if logs.get(f"count.{grp}", 0) > 0:
+                logs[f"acc.{grp}"] /= logs[f"count.{grp}"]
+
+        # Compute Class Accuracies & Macro Average
+        label_accs = []
+        for lbl in self.label_ids:
+            denom = outputs.get(f"lblcnt.{lbl}", torch.as_tensor([0.])).sum()
+            if denom > 0:
+                l_acc = outputs.get(f"lbln_correct.{lbl}", torch.as_tensor([0.])).sum() / denom
+                logs[f"acc.{lbl}"] = l_acc
+                label_accs.append(l_acc)
+
+        if label_accs:
+            logs["macro_avg_acc"] = torch.mean(torch.stack(label_accs))
+        else:
+            logs["macro_avg_acc"] = acc
+
+        macro_acc = logs.pop("macro_avg_acc", 0.0) 
+        logs.pop("loss", None)
+        
+        self.log_dict({f"val/{k}": v for k, v in logs.items()}, sync_dist=True)
         self.log("val/loss", avg_loss, sync_dist=True, prog_bar=True)
-        self.log("val/macro_avg_acc", avg_acc, sync_dist=True, prog_bar=True)
+        self.log("val/macro_avg_acc", macro_acc, sync_dist=True, prog_bar=True)
+        
         self.validation_step_outputs.clear()
 
 def train(config):
@@ -141,7 +212,8 @@ def train(config):
     
     checkpoint_callback = ModelCheckpoint(
         monitor="val/macro_avg_acc", mode="max", save_top_k=1, save_last=True,
-        dirpath=ckpt_dir, filename='best-epoch={epoch:02d}-val_acc={val/macro_avg_acc:.2f}'
+        dirpath=ckpt_dir, filename='best-epoch={epoch:02d}-val_acc={val/macro_avg_acc:.2f}',
+        auto_insert_metric_name=False
     )
     
     train_dl = DataLoader(get_training_set(split=config.subset, roll=int(44100 * config.roll_sec)), 
@@ -157,7 +229,8 @@ def train(config):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project_name", type=str, default="DCASE25_Final_Benchmark")
+    # UPDATED: Corrected WandB project name to match the rest of your experiment space
+    parser.add_argument("--project_name", type=str, default="DCASE25_Hybrid_Architecture")
     parser.add_argument("--experiment_name", type=str, default="xLSTM_2Block_Balanced")
     parser.add_argument("--sequence_engine", type=str, default="xlstm", choices=['gru', 'xlstm'])
     
@@ -169,20 +242,5 @@ if __name__ == '__main__':
     
     # Optimization
     parser.add_argument("--lr", type=float, default=0.0005) 
-    parser.add_argument("--weight_decay", type=float, default=0.05) # Strong regularization
+    parser.add_argument("--weight_decay", type=float, default=0.05) 
     parser.add_argument("--n_epochs", type=int, default=150)
-    parser.add_argument("--warmup_steps", type=int, default=1000)
-    
-    # Environment
-    parser.add_argument("--batch_size", type=int, default=16) 
-    parser.add_argument("--precision", type=str, default="16-mixed")
-    parser.add_argument("--subset", type=int, default=25)
-    parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--roll_sec", type=float, default=0.1)
-    parser.add_argument("--n_classes", type=int, default=10)
-    parser.add_argument("--patch_size", type=int, default=4) # Legacy placeholders
-    parser.add_argument("--d_state", type=int, default=32)
-    parser.add_argument("--d_conv", type=int, default=4)
-    parser.add_argument("--check_val_every_n_epoch", type=int, default=1)
-
-    train(parser.parse_args())
