@@ -15,7 +15,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 from dataset.dcase25 import get_training_set, get_test_set
-# from models.hybrid_net import get_model as get_mamba_model
+from models.hybrid_net import get_model as get_mamba_model
 from models.hybrid_gru import get_model as get_gru_model
 from models.hybrid_xlstm import get_model as get_xlstm_model
 from helpers.complexity import get_torch_macs_memory
@@ -44,8 +44,7 @@ class DirectStudentModule(pl.LightningModule):
         elif config.sequence_engine.lower() == "xlstm":
             self.student = get_xlstm_model(**model_kwargs)
         elif config.sequence_engine.lower() == "mamba":
-            # self.student = get_mamba_model(**model_kwargs)
-            pass
+            self.student = get_mamba_model(**model_kwargs)
         else:
             raise ValueError(f"Unknown engine: {config.sequence_engine}")
 
