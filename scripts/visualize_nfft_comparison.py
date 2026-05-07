@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore", message="At least one mel filterbank has all z
 
 DATASET_DIR = "/home/abdalaziz-ayoub/datasets/PR_DATA"
 META_CSV    = os.path.join(DATASET_DIR, "meta_clean.csv")
-ASSETS_DIR  = "assets"
+ASSETS_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
 SAMPLE_RATE = 44100
 HOP_LENGTH  = 1364
 N_MELS      = 128  # 256 causes empty filterbank bins for n_fft=1024 (only 513 linear bins)

@@ -12,15 +12,17 @@ Outputs:
 
 import os
 import re
+import sys
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from sklearn.metrics import confusion_matrix
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _eval_utils import MODELS, CLASSES, load_model, run_inference
 
-ASSETS_DIR = "assets"
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
 os.makedirs(ASSETS_DIR, exist_ok=True)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

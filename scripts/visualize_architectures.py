@@ -22,10 +22,13 @@ import shutil
 import subprocess
 import sys
 
-ROOT     = os.path.dirname(os.path.abspath(__file__))
-DIAG_DIR = os.path.join(ROOT, "diagrams")
-PLOTNN   = os.path.join(ROOT, "PlotNeuralNet")
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT         = os.path.dirname(_SCRIPTS_DIR)
+DIAG_DIR     = os.path.join(ROOT, "diagrams")
+PLOTNN       = os.path.join(ROOT, "PlotNeuralNet")
+ASSETS_DIR   = os.path.join(ROOT, "assets")
 os.makedirs(DIAG_DIR, exist_ok=True)
+os.makedirs(ASSETS_DIR, exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────────
 # Bootstrap
@@ -365,8 +368,6 @@ def generate_pngs(embed_dim, depth):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    cwd = os.getcwd()
-
     specs = [
         ("hybrid_mamba", "Hybrid CNN-Mamba",
          "mamba",
@@ -390,7 +391,7 @@ def generate_pngs(embed_dim, depth):
         fig.patch.set_facecolor(PALETTES[key]["bg"])
         ax.set_facecolor(PALETTES[key]["bg"])
         draw_arch(ax, title, PALETTES[key], tlabel, tsub, bsub, embed_dim, depth)
-        out = os.path.join(cwd, filename + ".png")
+        out = os.path.join(ASSETS_DIR, filename + ".png")
         fig.savefig(out, dpi=180, bbox_inches="tight",
                     facecolor=PALETTES[key]["bg"])
         plt.close(fig)
@@ -406,7 +407,7 @@ def generate_pngs(embed_dim, depth):
     plt.suptitle("Hybrid CNN Architectures – DCASE 2025",
                  fontsize=13, fontweight="bold", y=1.002)
     plt.tight_layout(pad=0.8, h_pad=2.5)
-    out = os.path.join(cwd, "all_architectures.png")
+    out = os.path.join(ASSETS_DIR, "all_architectures.png")
     fig.savefig(out, dpi=180, bbox_inches="tight", facecolor="#F5F5F5")
     plt.close(fig)
     print(f"  → {out}  (combined)")
@@ -439,7 +440,7 @@ def main():
             print(f"  failed: {e}")
 
     print(f"\n{'='*58}")
-    print(f"  PNGs saved to: {os.getcwd()}/")
+    print(f"  PNGs saved to: {ASSETS_DIR}/")
     print(f"  LaTeX files:   {DIAG_DIR}/")
     print("=" * 58)
 

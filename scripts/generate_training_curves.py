@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
-ASSETS_DIR = "assets"
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
 os.makedirs(ASSETS_DIR, exist_ok=True)
 
 WANDB_PROJECT = "DCASE25_Hybrid_Architecture"
